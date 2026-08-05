@@ -1,0 +1,8 @@
+# Never commit these -- they hold user credentials and the encryption key.
+gst_bridge_data.db
+secret.key
+
+# Common Python clutter
+__pycache__/
+*.pyc
+.DS_Store

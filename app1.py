@@ -334,12 +334,13 @@ st.markdown(
             font-size: 3.1rem;
             letter-spacing: 1px;
             margin: 0;
+            padding-bottom: 0.15em;
             background: linear-gradient(90deg, {GOLD_LIGHT} 0%, {GOLD} 55%, #b8860b 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
             text-shadow: 0 4px 18px rgba(0,0,0,0.35);
-            line-height: 1.15;
+            line-height: 1.35;
         }}
         .hero-subtitle {{
             color: #dfe7f5;
@@ -506,8 +507,33 @@ st.markdown(
             opacity: 0.55 !important;
             color: {NAVY} !important;
             background: {GOLD_LIGHT} !important;
+            background-image: none !important;
         }}
-
+        section[data-testid="stSidebar"] .nav-btn-scope .stButton > button:not(:disabled) {{
+            background: transparent !important;
+            background-image: none !important;
+            background-color: transparent !important;
+            color: {GOLD} !important;
+            border: 2px solid {GOLD} !important;
+            box-shadow: none !important;
+        }}
+        section[data-testid="stSidebar"] .nav-btn-scope .stButton > button:not(:disabled) p {{
+            color: {GOLD} !important;
+        }}
+        section[data-testid="stSidebar"] .nav-btn-scope .stButton > button:not(:disabled):hover,
+        section[data-testid="stSidebar"] .nav-btn-scope .stButton > button:not(:disabled):active,
+        section[data-testid="stSidebar"] .nav-btn-scope .stButton > button:not(:disabled):focus {{
+            background: linear-gradient(135deg, {GOLD} 0%, #c79c2e 100%) !important;
+            background-color: {GOLD} !important;
+            color: {NAVY} !important;
+            border: 2px solid {GOLD} !important;
+            box-shadow: 0 4px 12px rgba(212,175,55,0.35) !important;
+        }}
+        section[data-testid="stSidebar"] .nav-btn-scope .stButton > button:not(:disabled):hover p,
+        section[data-testid="stSidebar"] .nav-btn-scope .stButton > button:not(:disabled):active p,
+        section[data-testid="stSidebar"] .nav-btn-scope .stButton > button:not(:disabled):focus p {{
+            color: {NAVY} !important;
+        }}
         .footer-bar {{
             position: fixed;
             left: 0;
@@ -1054,14 +1080,19 @@ def _run_reconciliation(df_books_raw, df_2b_raw, books_map, gstr2b_map, toleranc
 
     criteria_desc = "Taxable Value/IGST" if tax_criteria == "IGST" else "Taxable Value/CGST/SGST"
 
-    missing_rows = []
+    books_rows = [row for _, row in books.iterrows()]
+    n = len(books_rows)
+    outcomes = [None] * n  # each entry: (matched_clean: bool, reason: str or None)
+    pending_positions = []
 
-    for _, b in books.iterrows():
+    # ---------- Pass 1: invoice-number matching for every row ----------
+    # Every row gets first crack at matching by its own invoice number before
+    # any row is allowed to fall back to guessing by amounts. This stops an
+    # amount-only guess (pass 2) from "stealing" a 2B row that another,
+    # not-yet-processed invoice would have matched correctly by number.
+    for pos, b in enumerate(books_rows):
         inv_norm = b["Invoice No Norm"]
         candidate_idxs = [i for i in norm_to_indices.get(inv_norm, []) if not gstr2b_records[i]["_used"]]
-
-        matched_clean = False
-        reason = None
 
         if inv_norm and candidate_idxs:
             best_idx = None
@@ -1079,30 +1110,43 @@ def _run_reconciliation(df_books_raw, df_2b_raw, books_map, gstr2b_map, toleranc
             gstr2b_records[best_idx]["_used"] = True
 
             if all(ok for _, ok in best_flags):
-                matched_clean = True
+                outcomes[pos] = (True, None)
             else:
                 mismatch_details = [name for name, ok in best_flags if not ok]
                 reason = "Invoice No. matches 2B, but mismatch in: " + ", ".join(mismatch_details)
+                outcomes[pos] = (False, reason)
         else:
-            amt_match_idx = None
-            for i, cand in enumerate(gstr2b_records):
-                if cand["_used"]:
-                    continue
-                flags = compute_match_flags(b, cand, tolerance, tax_criteria)
-                if all(ok for _, ok in flags):
-                    amt_match_idx = i
-                    break
+            pending_positions.append(pos)
 
-            if amt_match_idx is not None:
-                gstr2b_records[amt_match_idx]["_used"] = True
-                matched_invoice_no = gstr2b_records[amt_match_idx]["Invoice No Raw"]
-                reason = (
-                    f"Invoice No. not found in 2B, but {criteria_desc.replace('/', ' + ')} match "
-                    f"2B invoice '{matched_invoice_no}' - possible invoice number typo/mismatch"
-                )
-            else:
-                reason = f"Not found in 2B - no match on Invoice No. or on {criteria_desc} combination"
+    # ---------- Pass 2: amount-based fallback, only for rows still unresolved ----------
+    # Only 2B rows left unused after pass 1 are eligible here.
+    for pos in pending_positions:
+        b = books_rows[pos]
+        amt_match_idx = None
+        for i, cand in enumerate(gstr2b_records):
+            if cand["_used"]:
+                continue
+            flags = compute_match_flags(b, cand, tolerance, tax_criteria)
+            if all(ok for _, ok in flags):
+                amt_match_idx = i
+                break
 
+        if amt_match_idx is not None:
+            gstr2b_records[amt_match_idx]["_used"] = True
+            matched_invoice_no = gstr2b_records[amt_match_idx]["Invoice No Raw"]
+            reason = (
+                f"Invoice No. not found in 2B, but {criteria_desc.replace('/', ' + ')} match "
+                f"2B invoice '{matched_invoice_no}' - possible invoice number typo/mismatch"
+            )
+        else:
+            reason = f"Not found in 2B - no match on Invoice No. or on {criteria_desc} combination"
+
+        outcomes[pos] = (False, reason)
+
+    missing_rows = []
+    for pos in range(n):
+        b = books_rows[pos]
+        matched_clean, reason = outcomes[pos]
         if not matched_clean:
             missing_rows.append(
                 {
@@ -1192,19 +1236,52 @@ def _render_results_section():
         st.write("")
         st.dataframe(filtered_df, use_container_width=True, height=420)
 
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            sheet_name = "Missing in 2B"
+        def _write_result_sheet(workbook, writer, sheet_name, sheet_df, subtitle_text, fmts):
+            """Writes one worksheet using the same header/title/footer layout and
+            formatting rules as the main sheet."""
+            title_fmt, subtitle_fmt, header_fmt, cell_fmt, money_fmt, footer_fmt = fmts
+
             title_row = 0
             subtitle_row = 1
             header_row = 3
-            filtered_df.to_excel(writer, index=False, sheet_name=sheet_name, startrow=header_row)
+            sheet_df.to_excel(writer, index=False, sheet_name=sheet_name, startrow=header_row)
 
-            workbook = writer.book
             worksheet = writer.sheets[sheet_name]
 
-            n_cols = len(filtered_df.columns)
-            n_rows = len(filtered_df)
+            n_cols = len(sheet_df.columns)
+            n_rows = len(sheet_df)
+            last_col = max(n_cols - 1, 0)
+
+            worksheet.merge_range(title_row, 0, title_row, last_col, "Reconciled Invoice Wise GST Data", title_fmt)
+            worksheet.merge_range(subtitle_row, 0, subtitle_row, last_col, subtitle_text, subtitle_fmt)
+
+            for col_num, col_name in enumerate(sheet_df.columns):
+                worksheet.write(header_row, col_num, col_name, header_fmt)
+
+            money_cols = {"Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount"}
+            for row_num in range(n_rows):
+                for col_num, col_name in enumerate(sheet_df.columns):
+                    val = sheet_df.iloc[row_num, col_num]
+                    fmt = money_fmt if col_name in money_cols else cell_fmt
+                    worksheet.write(header_row + 1 + row_num, col_num, val, fmt)
+
+            footer_row = header_row + n_rows + 2
+            worksheet.merge_range(
+                footer_row, 0, footer_row, last_col, "Reconciled using The GST Bridge by Sarthak Patadiya", footer_fmt
+            )
+
+            if n_rows > 0:
+                worksheet.autofilter(header_row, 0, header_row + n_rows, last_col)
+
+            widths = [18, 14, 8, 15, 13, 13, 13, 22, 55]
+            for i, w in enumerate(widths[:n_cols]):
+                worksheet.set_column(i, i, w)
+
+            worksheet.freeze_panes(header_row + 1, 0)
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            workbook = writer.book
 
             title_fmt = workbook.add_format(
                 {"bold": True, "font_color": GOLD, "bg_color": NAVY, "font_size": 16, "align": "center", "valign": "vcenter"}
@@ -1220,34 +1297,24 @@ def _render_results_section():
             footer_fmt = workbook.add_format(
                 {"italic": True, "font_color": GOLD, "bg_color": NAVY, "font_size": 10, "align": "center", "valign": "vcenter"}
             )
+            fmts = (title_fmt, subtitle_fmt, header_fmt, cell_fmt, money_fmt, footer_fmt)
 
-            last_col = max(n_cols - 1, 0)
-            worksheet.merge_range(title_row, 0, title_row, last_col, "Reconciled Invoice Wise GST Data", title_fmt)
-            worksheet.merge_range(subtitle_row, 0, subtitle_row, last_col, "Mismatched or missing invoices are as following.", subtitle_fmt)
-
-            for col_num, col_name in enumerate(filtered_df.columns):
-                worksheet.write(header_row, col_num, col_name, header_fmt)
-
-            money_cols = {"Taxable Amount", "CGST Amount", "SGST Amount", "IGST Amount"}
-            for row_num in range(n_rows):
-                for col_num, col_name in enumerate(filtered_df.columns):
-                    val = filtered_df.iloc[row_num, col_num]
-                    fmt = money_fmt if col_name in money_cols else cell_fmt
-                    worksheet.write(header_row + 1 + row_num, col_num, val, fmt)
-
-            footer_row = header_row + n_rows + 2
-            worksheet.merge_range(
-                footer_row, 0, footer_row, last_col, "Reconciled using The GST Bridge by Sarthak Patadiya", footer_fmt
+            # Sheet 1 - same as before: the filtered view currently shown on screen.
+            _write_result_sheet(
+                workbook, writer, "Missing in 2B", filtered_df,
+                "Mismatched or missing invoices are as following.", fmts,
             )
 
-            if n_rows > 0:
-                worksheet.autofilter(header_row, 0, header_row + n_rows, last_col)
-
-            widths = [18, 14, 8, 15, 13, 13, 13, 22, 55]
-            for i, w in enumerate(widths[: n_cols]):
-                worksheet.set_column(i, i, w)
-
-            worksheet.freeze_panes(header_row + 1, 0)
+            # Sheets 2-4 - one dedicated sheet per criteria, each holding every
+            # invoice in that category (independent of the on-screen filter above).
+            category_sheets = [
+                ("Completely Missing", "Completely Missing", "Invoices completely missing from GSTR-2B."),
+                ("Amount Mismatch", "Amount Mismatch", "Invoices with an amount mismatch against GSTR-2B."),
+                ("Invoice No Typo", "Possible Invoice Number Typo", "Invoices with a possible invoice number typo/mismatch."),
+            ]
+            for sheet_name, category_value, subtitle_text in category_sheets:
+                category_df = result_df[result_df["Criteria Type"] == category_value]
+                _write_result_sheet(workbook, writer, sheet_name, category_df, subtitle_text, fmts)
 
         output.seek(0)
         st.download_button(
